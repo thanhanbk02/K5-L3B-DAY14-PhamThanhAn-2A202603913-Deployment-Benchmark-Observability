@@ -260,6 +260,34 @@ Header phản hồi có `Server: nginx` và `X-Frame-Options: DENY`, tức reque
 
 Sau khi test: `docker compose -p k5-day14-docker down`.
 
+## Part 3: Cloud Deployment
+
+Nền tảng chính là Render. Agent Part 6 chạy tại `https://day14-agent-w8dm.onrender.com`, Blueprint `day14-agent`, commit `3dbdd8b`. Service Docker plan free, trạng thái Live. Redis là Key Value `day14-redis` cùng Blueprint. `AGENT_API_KEY` do Render sinh, không ghi vào repo.
+
+Bốn lệnh tự kiểm, chỉ lấy mã HTTP:
+
+```text
+GET /health                         → 200  {"status":"ok"}
+GET /ready                          → 200  {"ready":true}
+POST /ask  không có X-API-Key       → 401
+POST /ask  đúng X-API-Key           → 200
+{"question":"Hello","answer":"Agent đang hoạt động tốt! (mock response) Hỏi thêm câu hỏi đi nhé.","cost_usd":7.95e-06}
+```
+
+`/ready` trả 200 nghĩa là web service đã nối được Redis trên Render.
+
+### So sánh railway.toml và render.yaml
+
+`railway.toml` chỉ nói cách build và cách kiểm sức khỏe của một service: `builder = DOCKERFILE`, `healthcheckPath = /health`. File không tạo Redis. Muốn có `REDIS_URL` và `AGENT_API_KEY` thì phải tạo trên dashboard Railway rồi gắn vào service.
+
+`render.yaml` mô tả cả stack. Một Blueprint tạo web service Docker và Key Value, nối `REDIS_URL` bằng `fromService` / `connectionString`, và `AGENT_API_KEY` dùng `generateValue` nên secret không nằm trong git. File nằm trong `06-lab-complete/`, nên lúc tạo Blueprint phải điền path `06-lab-complete/render.yaml`. Service web có `rootDir: 06-lab-complete` để Docker build đúng thư mục đó, không build gốc repo.
+
+Hai file cùng trỏ health check vào `/health`. Khác nhau ở chỗ Railway để người dùng ráp Redis và secret trên dashboard, còn Render khai hết trong một file.
+
+### Exercise 3.3: Cloud Run
+
+`cloudbuild.yaml` chạy khi push lên `main`. Pipeline có bốn bước nối nhau: chạy pytest, build image gắn tag theo commit, push image lên Container Registry, rồi `gcloud run deploy`. `service.yaml` là định nghĩa service sau khi đã có image: public, giữ ít nhất 1 instance và tối đa 10, mỗi instance tối đa 80 request, health check `/health` và `/ready`. `OPENAI_API_KEY` và `AGENT_API_KEY` lấy từ Secret Manager, không ghi trong file.
+
 ## Part 4: API Security
 
 Ba lớp chặn ba việc khác nhau. Rate limit chặn gọi quá nhanh. Cost guard chặn tiêu quá tiền. Một lớp không thay được lớp kia: 10 request/phút vẫn có thể rất đắt nếu mỗi request tốn nhiều token, và vài request rẻ vẫn có thể làm sập server nếu đến cùng một lúc.
@@ -487,9 +515,15 @@ Xong thì `docker compose -p k5-day14-scaling down`.
 - Nhận: `/health` HTTP 200 dù body `degraded` vì RAM 94.4%; `docker stop` để request trả 200 rồi mới thấy signal 15; 5 câu đi qua 3 instance và history còn 10 dòng.
 - Tự kiểm tra: `docker compose ps` có agent-1, agent-2, agent-3; output script in ba `instance-...` và `Total messages: 10`. Tắt một agent rồi gọi tiếp cùng session, history thành 12 dòng.
 
+### CP6
+
+- Hỏi Cursor deploy CP6 lên Render và nói rõ cần cung cấp gì.
+- Nhận: Blueprint từ `06-lab-complete/render.yaml`, URL `https://day14-agent-w8dm.onrender.com`, bốn mã 200 / 200 / 401 / 200. Key không ghi vào bài.
+- Tự kiểm tra: `GET /health` và `GET /ready` trên URL đó trả 200; `POST /ask` không key trả 401; có key trả 200 với câu mock. Dashboard service ở trạng thái Live.
+
 ## Part 6: Final Project
 
-Code nằm trong `06-lab-complete/`. Chưa deploy lên internet. `render.yaml` đã khai Redis và `healthCheckPath: /health`, `AGENT_API_KEY` dùng `generateValue` nên không ghi key vào file. Deploy Render là CP6.
+Code nằm trong `06-lab-complete/`. Bản này đã deploy lên Render tại `https://day14-agent-w8dm.onrender.com` (mục Part 3). `render.yaml` khai Redis và `healthCheckPath: /health`. `AGENT_API_KEY` dùng `generateValue`, không ghi key vào file.
 
 `/health` luôn trả HTTP 200 khi process còn sống, kể cả khi Redis không nối được. Platform dùng endpoint này để quyết định có giết container không. Redis chết mà `/health` trả 503 thì platform restart vòng lặp một process vẫn chạy tốt. `/ready` trả 503 khi Redis không ping được, để load balancer ngừng gửi request mới, nhưng không giết process. Script chấm xác nhận đúng cặp này: Redis trỏ vào cổng đóng thì `/ready` là 503 và `/health` vẫn 200.
 
