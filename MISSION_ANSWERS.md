@@ -380,6 +380,87 @@ HTTP/1.1 200 OK
 
 10 request mock chỉ tốn khoảng 0.0002 USD trên ngân sách 1 USD, nhưng request thứ 11 đã bị **429**. Rate limit cắt tốc độ trước khi cost guard kịp cắt tiền. Đó là lý do phải có cả hai.
 
+## Part 5: Scaling & Reliability
+
+`/health` và `/ready` trả lời hai câu khác nhau. `/health` (liveness) hỏi process còn sống không. Platform thấy mã không phải 200 thì restart container. Endpoint này phải trả 200 cả khi Redis chậm, nếu không platform giết nhầm process vẫn chạy tốt. `/ready` (readiness) hỏi instance có nên nhận user mới không. Load balancer thấy 503 thì ngừng gửi traffic tới instance đó, nhưng không giết process. Trong `05-scaling-reliability/develop/app.py`, `/ready` trả 503 khi `_is_ready` còn false (đang khởi động hoặc đang tắt). Trong bản production, `/ready` còn trả 503 khi `ping` Redis thất bại, còn `/health` vẫn trả HTTP 200 và chỉ ghi `status: degraded` trong body.
+
+State trong RAM hỏng khi có nhiều instance vì mỗi process một bộ nhớ. User nói tên ở instance 1, câu sau rơi vào instance 2 thì instance 2 không có đoạn hội thoại đó. Redis dùng chung một key `session:{id}` nên instance nào cũng đọc được.
+
+### Exercise 5.1: Health check
+
+Chạy `05-scaling-reliability/develop/app.py`. `POST /ask` của bản này nhận `question` trên query, và mock chờ khoảng 3 giây.
+
+```text
+GET /health → HTTP/1.1 200 OK
+{"status":"degraded","uptime_seconds":38.5,"version":"1.0.0","environment":"development","timestamp":"2026-11-26T08:11:06.448729+00:00","checks":{"memory":{"status":"degraded","used_percent":94.4}}}
+
+GET /ready → HTTP/1.1 200 OK
+{"ready":true,"in_flight_requests":1}
+
+POST /ask?question=hello → HTTP/1.1 200 OK
+{"answer":"Agent đang hoạt động tốt! (mock response) Hỏi thêm câu hỏi đi nhé."}
+```
+
+`/health` vẫn là HTTP 200 dù body ghi `degraded`, vì RAM máy lúc đo là 94.4%, trên ngưỡng 90% trong code. Platform chỉ nhìn mã HTTP thì không restart. `in_flight_requests: 1` trên `/ready` là chính request `/ready` đang được middleware đếm.
+
+### Exercise 5.2: Graceful shutdown
+
+`handle_sigterm` ghi log khi nhận tín hiệu 15. Uvicorn gọi lifespan shutdown: `_is_ready = False` (từ chối request mới, `/ready` thành 503), chờ `_in_flight_requests` về 0 tối đa 30 giây, rồi thoát.
+
+`docker stop` gửi SIGTERM tới process trong container. Request `POST /ask?question=Long%20task` đang chạy (mock khoảng 3 giây) vẫn trả xong:
+
+```text
+HTTP/1.1 200 OK
+{"answer":"Agent đang hoạt động tốt! (mock response) Hỏi thêm câu hỏi đi nhé."}
+```
+
+Log container sau đó:
+
+```text
+INFO:     Shutting down
+INFO:     172.17.0.1 - "POST /ask?question=Long%20task HTTP/1.1" 200 OK
+INFO 🔄 Graceful shutdown initiated...
+INFO ✅ Shutdown complete
+INFO Received signal 15 — uvicorn will handle graceful shutdown
+```
+
+Request đang xử lý được trả 200. Process tắt sau khi request xong, không cắt giữa chừng.
+
+### Exercise 5.3: Stateless
+
+`05-scaling-reliability/production/app.py` không giữ hội thoại trong biến toàn cục. `save_session` / `load_session` ghi JSON vào Redis, key `session:{session_id}`, TTL 3600 giây. Không có Redis thì code rơi về dict trong RAM và tự ghi cảnh báo "not scalable". Ba container lúc chạy đều log `Connected to Redis` và `storage: redis`.
+
+### Exercise 5.4 và 5.5: Ba instance và một session
+
+```text
+docker compose -p k5-day14-scaling up -d --build --scale agent=3
+```
+
+Stack mở cổng **8080**, không phải 80. Endpoint hội thoại là `POST /chat`, không phải `/ask`. Có file `.env.local` trống. `docker compose ps` thấy `agent-1`, `agent-2`, `agent-3`, `redis-1` (healthy), `nginx-1` map `8080->80`.
+
+Tám lần `GET /health` qua Nginx lần lượt rơi vào ba IP và ba id: `instance-de4299`, `instance-becf1a`, `instance-507a5e`. Header `X-Served-By` đổi theo từng request. Nginx chia vòng tròn.
+
+`python test_stateless.py` gửi 5 câu trong cùng một session rồi đọc history. Script không tắt instance nào.
+
+```text
+Session ID: 81cabef0-f675-4593-8c7c-9b17fb7f45cd
+
+Request 1: [instance-507a5e]  What is Docker?
+Request 2: [instance-de4299]  Why do we need containers?
+Request 3: [instance-becf1a]  What is Kubernetes?
+Request 4: [instance-507a5e]  How does load balancing work?
+Request 5: [instance-de4299]  What is Redis used for?
+
+Instances used: instance-de4299, instance-507a5e, instance-becf1a
+Total messages: 10
+```
+
+Năm câu đi qua cả ba instance mà history vẫn đủ 10 dòng (5 user + 5 assistant). Nếu history nằm trong RAM của từng process, instance nhận câu 2 không thấy câu 1.
+
+Sau script, tắt `agent-1` (`instance-507a5e`) rồi gửi thêm một câu cùng `session_id`. Nginx thử IP của instance đã tắt rồi chuyển sang instance còn sống. Header có hai địa chỉ `X-Served-By: 172.23.0.5:8000, 172.23.0.4:8000`. Câu trả lời do `instance-de4299` phục vụ, `storage` là `redis`. History tăng lên 12 dòng, gồm cả năm câu trước. Instance chết không làm mất hội thoại, và traffic sang instance khác.
+
+Xong thì `docker compose -p k5-day14-scaling down`.
+
 ## AI log
 
 ### CP1
@@ -399,3 +480,9 @@ HTTP/1.1 200 OK
 - Hỏi Cursor làm CP3: chạy `04-api-gateway` develop và production, lấy mã 401, 200, 429, giải thích cost guard.
 - Nhận: output curl ở trên, vòng lặp 1–10 là 200 và 11–20 là 429, cách cost guard trả 402 hoặc 503.
 - Tự kiểm tra: thiếu `X-API-Key` ra 401, đúng key ra 200; `POST /auth/token` với `admin`/`secret` ra 401; token `student` gọi đủ 10 lần rồi lần 11 ra 429 với `x-ratelimit-limit: 10`. Token không dán vào bài.
+
+### CP4
+
+- Hỏi Cursor làm CP4: chạy health/ready, thử tắt khi đang có request, chạy 3 agent với Redis và `test_stateless.py`.
+- Nhận: `/health` HTTP 200 dù body `degraded` vì RAM 94.4%; `docker stop` để request trả 200 rồi mới thấy signal 15; 5 câu đi qua 3 instance và history còn 10 dòng.
+- Tự kiểm tra: `docker compose ps` có agent-1, agent-2, agent-3; output script in ba `instance-...` và `Total messages: 10`. Tắt một agent rồi gọi tiếp cùng session, history thành 12 dòng.
