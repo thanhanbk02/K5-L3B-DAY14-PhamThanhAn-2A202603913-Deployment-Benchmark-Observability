@@ -486,3 +486,40 @@ Xong thì `docker compose -p k5-day14-scaling down`.
 - Hỏi Cursor làm CP4: chạy health/ready, thử tắt khi đang có request, chạy 3 agent với Redis và `test_stateless.py`.
 - Nhận: `/health` HTTP 200 dù body `degraded` vì RAM 94.4%; `docker stop` để request trả 200 rồi mới thấy signal 15; 5 câu đi qua 3 instance và history còn 10 dòng.
 - Tự kiểm tra: `docker compose ps` có agent-1, agent-2, agent-3; output script in ba `instance-...` và `Total messages: 10`. Tắt một agent rồi gọi tiếp cùng session, history thành 12 dòng.
+
+## Part 6: Final Project
+
+Code nằm trong `06-lab-complete/`. Chưa deploy lên internet. `render.yaml` đã khai Redis và `healthCheckPath: /health`, `AGENT_API_KEY` dùng `generateValue` nên không ghi key vào file. Deploy Render là CP6.
+
+`/health` luôn trả HTTP 200 khi process còn sống, kể cả khi Redis không nối được. Platform dùng endpoint này để quyết định có giết container không. Redis chết mà `/health` trả 503 thì platform restart vòng lặp một process vẫn chạy tốt. `/ready` trả 503 khi Redis không ping được, để load balancer ngừng gửi request mới, nhưng không giết process. Script chấm xác nhận đúng cặp này: Redis trỏ vào cổng đóng thì `/ready` là 503 và `/health` vẫn 200.
+
+Rate limit là sliding window 60 giây trong Redis, key theo API key. Script đặt `RATE_LIMIT_PER_MINUTE=5` và 2 worker: quá 5 request thành công thì 429, restart process vẫn 429 vì bộ đếm không nằm trong RAM. Cost guard đọc `DAILY_BUDGET_USD`. Script đặt ngân sách `0.000001` USD thì request đầu đã 402. SIGTERM lúc đang có request: request đó vẫn 200, process thoát exit code 0. `docker stop` xong trong 0.7 giây. Image build được là 56 MB.
+
+Chạy trong Ubuntu (WSL), `os.name=posix`, Docker server 29.7.2:
+
+```text
+================================================================
+  📋 Checklist Deliverable
+     ✅ Dockerfile (multi-stage, < 500 MB)
+     ✅ docker-compose.yml (agent + redis)
+     ✅ .dockerignore
+     ✅ Health check endpoint (GET /health)
+     ✅ Readiness endpoint (GET /ready)
+     ✅ API Key authentication
+     ✅ Rate limiting
+     ✅ Cost guard
+     ✅ Config từ environment variables
+     ✅ Structured logging
+     ✅ Graceful shutdown
+     ✅ Public URL ready (Railway / Render config)
+----------------------------------------------------------------
+  Result: 12/12 tiêu chí đạt · 43/43 checks passed
+  🎉 PASS 12/12 — PRODUCTION READY! Deploy nào!
+================================================================
+```
+
+### CP5
+
+- Hỏi Cursor làm CP5: sửa TODO trong `06-lab-complete/` cho đủ 12 tiêu chí, chạy `python check_production_ready.py` đến khi PASS. Chưa cần tài khoản Render.
+- Nhận: agent có `/health` luôn 200, `/ready` 503 khi Redis chết, API key 401, rate limit 429 trong Redis, cost guard 402, log JSON, Dockerfile multi-stage 56 MB, compose agent + redis, `render.yaml` và `railway.toml`. Output script ở trên.
+- Tự kiểm tra: script chạy trong WSL (`os.name=posix`) với Docker 29.7.2, in `12/12 tiêu chí đạt · 43/43 checks passed`. Không sửa `check_production_ready.py`.
