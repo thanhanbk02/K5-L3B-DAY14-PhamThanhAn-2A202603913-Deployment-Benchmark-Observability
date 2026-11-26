@@ -32,7 +32,6 @@ services:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
       - TRACING_ENABLED=true
     deploy:
-      replicas: 2
       resources:
         limits:
           cpus: "0.5"

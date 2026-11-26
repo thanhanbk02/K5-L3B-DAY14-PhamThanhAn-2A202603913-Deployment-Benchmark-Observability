@@ -527,6 +527,12 @@ Xong thì `docker compose -p k5-day14-scaling down`.
 - Nhận: số trong `BENCHMARK_REPORT.md` mục 1–3, file JSON trong `develop/reports/`, histogram `agent_question_length_chars`, hai mục KB cho `security-02` và `scaling-03`, workflow `.github/workflows/eval.yml`.
 - Tự kiểm tra: `eval_v2_fixed.json` có accuracy 1.0 và quality gate passed. Bốn file `load_v2_c*.json` và ba file `load_v2_slow_*.json` có đủ. Số trong báo cáo khớp các file đó.
 
+### CP8
+
+- Hỏi Cursor làm CP8: bật stack observability, Locust 1 và 3 instance, chụp Grafana, Jaeger, Prometheus.
+- Nhận: `BENCHMARK_REPORT.md` mục 4–6, CSV `scale_1_stats.csv` và `scale_3_stats.csv`, bốn ảnh trong `screenshots/`. Hai alert firing sau 96 giây và 156 giây.
+- Tự kiểm tra: lúc đo 1 instance chỉ có một container, lúc đo 3 instance có ba container. Ảnh Prometheus thấy `AgentHighErrorRate` và `AgentHighLatencyP95` cùng firing. `trace_id` trong báo cáo có trong log JSON.
+
 ## Part 6: Final Project
 
 Code nằm trong `06-lab-complete/`. Bản này đã deploy lên Render tại `https://day14-agent-w8dm.onrender.com` (mục Part 3). `render.yaml` khai Redis và `healthCheckPath: /health`. `AGENT_API_KEY` dùng `generateValue`, không ghi key vào file.

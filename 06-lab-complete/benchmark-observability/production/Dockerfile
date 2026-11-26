@@ -21,10 +21,14 @@ COPY --from=builder /root/.local /home/agent/.local
 COPY app/ ./app/
 COPY utils/ ./utils/
 
-RUN chown -R agent:agent /app
+RUN chown -R agent:agent /app /home/agent
 
 USER agent
 
+# useradd đặt home là /app, còn pip --user nằm ở /home/agent/.local.
+# Không chỉ HOME thì Python không thấy uvicorn.
+ENV HOME=/home/agent
+ENV PYTHONUSERBASE=/home/agent/.local
 ENV PATH=/home/agent/.local/bin:$PATH
 ENV PYTHONPATH=/app
 ENV PYTHONDONTWRITEBYTECODE=1
