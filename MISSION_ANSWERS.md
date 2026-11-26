@@ -1,0 +1,275 @@
+# Day 14 Lab - Mission Answers
+
+## Part 1: Localhost vs Production
+
+### Exercise 1.1: Anti-patterns found
+
+Đọc `01-localhost-vs-production/develop/app.py`. Bản develop chạy được trên laptop, nhưng chưa sẵn sàng cho production. Có ít nhất 8 vấn đề:
+
+1. **Secret hardcode trong source.** `OPENAI_API_KEY` và mật khẩu database nằm thẳng trong file. Push repo public là lộ key ngay, kể cả sau khi xóa ở commit sau vì secret vẫn còn trong lịch sử git.
+
+```python
+# develop/app.py, dòng 17–18
+OPENAI_API_KEY = "sk-hardcoded-fake-key-never-do-this"
+DATABASE_URL = "postgresql://admin:password123@localhost:5432/mydb"
+```
+
+2. **Không có config management.** `DEBUG` và `MAX_TOKENS` gán cứng. Đổi môi trường (dev / staging / production) thì phải sửa code rồi deploy lại.
+
+```python
+# develop/app.py, dòng 21–22
+DEBUG = True
+MAX_TOKENS = 500
+```
+
+3. **`print()` thay cho logging, và in luôn secret.** Log aggregator không parse được dòng chữ tự do. Dòng in key còn làm secret xuất hiện ở stdout, nơi platform thường thu thập log.
+
+```python
+# develop/app.py, dòng 33–34
+print(f"[DEBUG] Got question: {question}")
+print(f"[DEBUG] Using key: {OPENAI_API_KEY}")  # log ra secret
+```
+
+4. **Không có health check.** Không có `GET /health` hay `GET /ready`. Platform không có cách nào biết process còn sống hoặc đã sẵn sàng nhận traffic, nên không restart đúng lúc và cũng không rút instance hỏng khỏi load balancer.
+
+5. **Không xử lý tắt an toàn.** Không có handler `SIGTERM` và không có lifespan shutdown. Railway/Render/Docker gửi `SIGTERM` trước khi giết process. Không bắt tín hiệu này thì request đang xử lý bị cắt giữa chừng.
+
+6. **Port cố định 8000.** Cloud inject cổng qua biến `PORT`. App không đọc biến đó thì platform báo app không lắng nghe đúng cổng và health check fail.
+
+```python
+# develop/app.py, dòng 49–53
+uvicorn.run(
+    "app:app",
+    host="localhost",   # chỉ chạy được trên local
+    port=8000,          # cứng port
+    reload=True         # debug reload trong production
+)
+```
+
+7. **Bind `localhost`.** Trong container, process chỉ nghe trên loopback của chính container. Nginx hoặc platform ở network khác không kết nối được. Production phải bind `0.0.0.0`.
+
+8. **`reload=True` luôn bật.** Reloader là công cụ lúc sửa code. Trên production nó tốn CPU, theo dõi file, và restart ngoài ý muốn.
+
+### Exercise 1.2: Chạy bản develop
+
+Đã cài `01-localhost-vs-production/develop/requirements.txt` và chạy `python app.py`. Uvicorn báo `Uvicorn running on http://localhost:8000`.
+
+Lớp K5: bản develop nhận `question` qua query string. Lệnh JSON trong `CODE_LAB.md` trả 422.
+
+```text
+curl.exe -sS -i -X POST "http://localhost:8000/ask?question=Hello"
+```
+
+```text
+HTTP/1.1 200 OK
+content-type: application/json
+
+{"answer":"Đây là câu trả lời từ AI agent (mock). Trong production, đây sẽ là response từ OpenAI/Anthropic."}
+```
+
+Cùng lúc, console của server in secret ra:
+
+```text
+[DEBUG] Got question: Hello
+[DEBUG] Using key: sk-hardcoded-fake-key-never-do-this
+[DEBUG] Response: Đây là câu trả lời từ AI agent (mock). Trong production, đây sẽ là response từ OpenAI/Anthropic.
+```
+
+Gửi JSON như `CODE_LAB.md` thì thiếu query `question`:
+
+```text
+HTTP/1.1 422 Unprocessable Content
+
+{"detail":[{"type":"missing","loc":["query","question"],"msg":"Field required","input":null}]}
+```
+
+`GET /health` và `GET /ready` đều `404 Not Found`. App trả lời được câu hỏi, nhưng platform không kiểm tra sức khỏe được, và mỗi request làm secret xuất hiện trên log. Đó chưa phải production-ready.
+
+### Exercise 1.3: So sánh với bản production
+
+Đã copy `.env.example` thành `.env` trong `01-localhost-vs-production/production/`, nạp biến môi trường rồi chạy `python app.py`. Process bind `0.0.0.0:8000` (đọc từ `HOST` và `PORT`). Log khởi động: `OPENAI_API_KEY not set — using mock LLM` (cảnh báo, không crash, vì lab dùng mock).
+
+`POST /ask` của bản production nhận JSON body, không nhận query:
+
+```text
+curl.exe -sS -i -X POST http://localhost:8000/ask -H "Content-Type: application/json" --data-binary "@ask.json"
+```
+
+Nội dung `ask.json`: `{"question":"Hello"}`
+
+```text
+HTTP/1.1 200 OK
+
+{"question":"Hello","answer":"Đây là câu trả lời từ AI agent (mock). Trong production, đây sẽ là response từ OpenAI/Anthropic.","model":"gpt-4o-mini"}
+```
+
+Body rỗng `{"question":""}` trả 422 với `{"detail":"question field is required"}`, không lộ stack trace.
+
+```text
+GET /health → 200
+{"status":"ok","uptime_seconds":5.6,"version":"1.0.0","environment":"development","timestamp":"2026-11-26T07:36:10.290650+00:00"}
+
+GET /ready → 200
+{"ready":true}
+```
+
+| Feature | Develop | Production | Tại sao quan trọng? |
+| --- | --- | --- | --- |
+| Config | Gán cứng trong `app.py` (`DEBUG`, `MAX_TOKENS`, port 8000) | `config.py` đọc `os.getenv` (`PORT`, `HOST`, `DEBUG`, `MAX_TOKENS`, …) | Cloud đặt `PORT` và các biến khác lúc chạy. Đổi staging sang production không cần sửa code. |
+| Secrets | `"sk-hardcoded-fake-key-never-do-this"` và password trong `DATABASE_URL` | `OPENAI_API_KEY` và `AGENT_API_KEY` lấy từ env; `.env` không được commit, chỉ có `.env.example` | Key trong git là key đã lộ. Người lạ dùng key đó gọi API tính tiền vào tài khoản của mình. `config.py` còn fail fast nếu `ENVIRONMENT=production` mà thiếu `AGENT_API_KEY`. |
+| Bind address | `host="localhost"` | `host` mặc định `0.0.0.0` | Container và load balancer không nói chuyện được với process chỉ nghe loopback. |
+| Health check | Không có endpoint. `GET /health` ra 404 | `GET /health` luôn 200 khi process sống (liveness); `GET /ready` trả 200 khi đã startup xong, 503 khi `is_ready` còn false | Liveness để platform restart process chết. Readiness để load balancer không gửi user vào instance đang khởi động. Gộp hai cái làm một thì Redis chậm có thể khiến platform giết nhầm process vẫn sống. |
+| Logging | `print`, kèm nguyên API key | `logger`, chỉ ghi `question_length` và `response_length`, không ghi key | Log production được thu vào hệ thống tập trung. In secret ở đó là phát tán secret. Log có cấu trúc thì lọc theo event được. |
+| Shutdown | Tắt là chết ngay, không handler | `lifespan` hạ `is_ready` rồi chờ request hiện tại; `handle_sigterm` nhận `SIGTERM` | Deploy mới luôn bắt đầu bằng tắt bản cũ. Cắt request giữa chừng làm user nhận lỗi 502 dù câu trả lời gần xong. |
+| Reload | `reload=True` luôn | `reload=settings.debug`, mặc định `DEBUG=false` | Reloader chỉ dành cho lúc sửa code trên máy. Production cần process ổn định. |
+| CORS | Không cấu hình | `ALLOWED_ORIGINS` từ env | Trình duyệt chặn hoặc mở origin tùy môi trường, không hardcode domain frontend trong code. |
+
+Một chỗ develop sai và production đã sửa, kèm dòng code:
+
+- Develop in secret: `develop/app.py` dòng 34, `print(f"[DEBUG] Using key: {OPENAI_API_KEY}")`. Lần chạy trên in ra `Using key: sk-hardcoded-fake-key-never-do-this`.
+- Production không đưa key vào log. `production/app.py` dòng 111–115 chỉ ghi độ dài câu hỏi và IP:
+
+```python
+# production/app.py, dòng 111–115
+logger.info(json.dumps({
+    "event": "agent_request",
+    "question_length": len(question),
+    "client_ip": request.client.host,
+}))
+```
+
+Key nằm ở `production/config.py` dòng 27: `os.getenv("OPENAI_API_KEY", "")`.
+
+**Vì sao hardcode secret nguy hiểm.** Repo lab để public để nộp bài. Secret trong source đi theo mọi bản clone, mọi fork, và cả commit cũ. Thu hồi key trên dashboard chưa xóa được bản copy đã bị kéo về máy người khác.
+
+**Vì sao cần health check.** Platform không đọc được ý định của process. Nó chỉ gọi một URL. Không có URL đó thì nó không biết nên restart, và load balancer không biết nên ngừng gửi request.
+
+**Graceful shutdown là gì.** Khi nhận `SIGTERM`, app ngừng nhận request mới (`is_ready = False`), chờ request đang chạy trả xong, đóng kết nối, rồi thoát mã 0. `docker stop` và rolling deploy đều dựa vào khoảng chờ này. Không xử lý thì process bị `SIGKILL` sau timeout và user đang chờ câu trả lời bị đứt.
+
+Ghi chú lần chạy: log JSON của app (`event: startup`, `agent_request`) không xuất hiện trên console. `config.py` gọi `logging.warning` lúc import, trước `logging.basicConfig` trong `app.py`, rồi `uvicorn.run` cấu hình lại logging. Hành vi API vẫn đúng như bảng trên; định dạng log nhìn thấy ở code, không thấy thêm dòng JSON application trên stdout lần này.
+
+## Part 2: Docker
+
+Build từ gốc repo, vì Dockerfile `COPY` theo đường dẫn tính từ gốc. Không cần API key: cả hai image dùng mock LLM. File `02-docker/production/.env.local` để trống thì Compose vẫn lên được.
+
+### Exercise 2.1: Dockerfile cơ bản
+
+Đọc `02-docker/develop/Dockerfile`.
+
+1. **Base image:** `python:3.11` (bản full, không phải slim). Image này đã có Python 3.11 và nhiều gói hệ thống, nên nặng.
+2. **Working directory:** `/app`. Mọi lệnh `COPY`, `RUN`, `CMD` phía sau chạy trong thư mục này.
+3. **Vì sao `COPY requirements.txt` đứng trước `COPY` code:** Docker cache theo từng layer. Layer `pip install` chỉ bị làm lại khi `requirements.txt` đổi. Sửa `app.py` thì build dùng lại layer đã cài thư viện. Nếu copy cả source trước rồi mới `pip install`, mỗi lần sửa một dòng code phải cài lại toàn bộ dependency.
+4. **CMD và ENTRYPOINT:** `CMD` là lệnh mặc định khi container start, và bị thay hết nếu `docker run` thêm lệnh khác (`docker run my-agent:develop sh`). `ENTRYPOINT` là chương trình luôn chạy; phần thêm trên `docker run` được nối vào làm tham số. Dockerfile này chỉ có `CMD ["python", "app.py"]`, không đặt `ENTRYPOINT`.
+
+### Exercise 2.2: Build và chạy image develop
+
+```text
+docker build -f 02-docker/develop/Dockerfile -t my-agent:develop .
+docker run -d --name k5-cp2-develop -p 8000:8000 my-agent:develop
+```
+
+`docker images` báo `my-agent:develop` nặng **1.67GB**.
+
+Bản develop trong container cũng nhận `question` qua query. JSON bị 422.
+
+```text
+GET /health → 200
+{"status":"ok","uptime_seconds":9.2,"container":true}
+
+POST /ask?question=What%20is%20Docker → 200
+{"answer":"Container là cách đóng gói app để chạy ở mọi nơi. Build once, run anywhere!"}
+
+POST /ask với JSON {"question":"What is Docker?"} → 422
+{"detail":[{"type":"missing","loc":["query","question"],"msg":"Field required","input":null}]}
+```
+
+Log container: `Uvicorn running on http://0.0.0.0:8000`. Cùng một image chạy được mà không cần cài Python trên máy.
+
+### Exercise 2.3: Multi-stage và kích thước
+
+Đọc `02-docker/production/Dockerfile`.
+
+- **Stage 1, tên `builder`:** từ `python:3.11-slim`, cài `gcc` và `libpq-dev` để biên dịch dependency, rồi `pip install --user` vào `/root/.local`. Stage này không được deploy.
+- **Stage 2, tên `runtime`:** bắt đầu lại từ `python:3.11-slim` sạch, tạo user `appuser` không phải root, chỉ `COPY --from=builder` thư mục `/root/.local`, copy `main.py` và `utils/mock_llm.py`, thêm `HEALTHCHECK`, chạy `uvicorn` bằng user thường.
+
+Image nhỏ hơn vì bản develop đứng trên `python:3.11` full (compiler, tài liệu, gói hệ thống không cần lúc chạy). Bản production bỏ cả stage builder: `gcc`, `libpq-dev` và cache apt không đi vào image cuối. Image cuối chỉ còn runtime slim cộng site-packages và source.
+
+```text
+docker build -f 02-docker/production/Dockerfile -t my-agent:advanced .
+docker images my-agent
+```
+
+```text
+my-agent:develop    1.67GB
+my-agent:advanced   240MB
+```
+
+Quy 1.67GB về MB theo đơn vị `docker images` in ra (1 GB = 1000 MB): 1670 MB. Phần production nhỏ hơn `(1670 − 240) / 1670 = 85.6%`.
+
+### Exercise 2.4: Docker Compose
+
+Đọc `02-docker/production/docker-compose.yml`. Chạy với tên project riêng để không đụng image `production-agent` của bài sau:
+
+```text
+docker compose -p k5-day14-docker up -d --build
+```
+
+`docker compose ps` thấy 4 service, mỗi service một container:
+
+| Service | Image | Cổng trên máy | Trạng thái lúc test |
+| --- | --- | --- | --- |
+| nginx | nginx:alpine | 80 và 443 | Up |
+| agent | build từ Dockerfile production | không mở ra máy, chỉ 8000 trong mạng Docker | healthy |
+| redis | redis:7-alpine | không mở ra máy | healthy |
+| qdrant | qdrant/qdrant:v1.9.0 | không mở ra máy | healthy |
+
+File comment nói agent có 2 replica, nhưng compose không đặt `scale`. Lần chạy này là 1 agent. Nginx upstream cũng chỉ có `server agent:8000`.
+
+```text
+Client
+  │  http://localhost:80
+  ▼
+Nginx (reverse proxy, limit 10 request/giây)
+  │  mạng Docker "internal", tên DNS agent:8000
+  ▼
+Agent (uvicorn, PORT=8000)
+  ├── REDIS_URL=redis://redis:6379/0
+  └── QDRANT_URL=http://qdrant:6333
+```
+
+Agent chỉ start sau khi Redis và Qdrant healthy (`depends_on` + healthcheck). Nginx không publish cổng của agent: client chỉ vào được qua cổng 80. Ba service nói chuyện bằng tên service trên network `internal`, không cần IP.
+
+Test qua Nginx (bản production nhận JSON, không nhận query):
+
+```text
+GET http://localhost/health → 200
+Server: nginx
+{"status":"ok","uptime_seconds":12.6,"version":"2.0.0","timestamp":"2026-11-26T07:48:35.744126"}
+
+GET http://localhost/ready → 200
+{"ready":true}
+
+POST http://localhost/ask
+Content-Type: application/json
+{"question":"Explain microservices"}
+→ 200
+{"answer":"Tôi là AI agent được deploy lên cloud. Câu hỏi của bạn đã được nhận."}
+```
+
+Header phản hồi có `Server: nginx` và `X-Frame-Options: DENY`, tức request đi qua Nginx rồi mới tới agent.
+
+Sau khi test: `docker compose -p k5-day14-docker down`.
+
+## AI log
+
+### CP1
+
+- Hỏi Cursor làm CP1: đọc `develop/app.py` và `production/app.py`, chạy cả hai, ghi anti-pattern và bảng so sánh.
+- Nhận: danh sách anti-pattern kèm dòng code, output curl thật của cả hai bản, bảng so sánh có cột vì sao.
+- Tự kiểm tra: lệnh query của bản develop trả 200 và console in key giả; `GET /health` bản develop trả 404; bản production `GET /health` và `GET /ready` trả 200, `POST /ask` với JSON trả 200. Số và body trong bài là output của các lệnh đó, không chép từ README.
+
+### CP2
+
+- Hỏi Cursor làm CP2: đọc Dockerfile develop và production, build hai image, đo `docker images`, chạy Compose và test qua Nginx.
+- Nhận: 4 câu Exercise 2.1, output curl của container, kích thước 1.67GB và 240MB (chênh 85.6%), sơ đồ 4 service và kết quả test cổng 80.
+- Tự kiểm tra: `docker images my-agent` in đúng hai số đó; `GET /health` trong container develop trả `"container":true`; `GET http://localhost/health` lúc stack chạy có header `Server: nginx`. Không dùng số 800MB / 160MB trong README.
