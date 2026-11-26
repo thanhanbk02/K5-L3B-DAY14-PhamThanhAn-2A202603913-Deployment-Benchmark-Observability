@@ -260,6 +260,126 @@ Header phản hồi có `Server: nginx` và `X-Frame-Options: DENY`, tức reque
 
 Sau khi test: `docker compose -p k5-day14-docker down`.
 
+## Part 4: API Security
+
+Ba lớp chặn ba việc khác nhau. Rate limit chặn gọi quá nhanh. Cost guard chặn tiêu quá tiền. Một lớp không thay được lớp kia: 10 request/phút vẫn có thể rất đắt nếu mỗi request tốn nhiều token, và vài request rẻ vẫn có thể làm sập server nếu đến cùng một lúc.
+
+### Exercise 4.1: API key
+
+Đọc `04-api-gateway/develop/app.py`. Key được kiểm ở `verify_api_key` (dòng 39–54), gắn vào `POST /ask` bằng `Depends`. Giá trị đúng là biến môi trường `AGENT_API_KEY`.
+
+- Không có header `X-API-Key` → **401**.
+- Có header nhưng sai giá trị → **403**.
+- Đúng key → **200**.
+- `GET /` và `GET /health` không đi qua dependency này, nên platform vẫn kiểm tra sức khỏe được khi không có key.
+
+Đổi key bằng cách đặt `AGENT_API_KEY` mới rồi tắt và bật lại process. Key không nằm trong source, nên không cần sửa code và không commit key. Key cũ hết tác dụng ngay vì process đọc env lúc khởi động.
+
+Chạy: `AGENT_API_KEY=secret-key-123 python app.py`.
+
+Không có key:
+
+```text
+HTTP/1.1 401 Unauthorized
+content-type: application/json
+
+{"detail":"Missing API key. Include header: X-API-Key: <your-key>"}
+```
+
+Đúng key `X-API-Key: secret-key-123`:
+
+```text
+HTTP/1.1 200 OK
+content-type: application/json
+
+{"question":"Hello","answer":"Đây là câu trả lời từ AI agent (mock). Trong production, đây sẽ là response từ OpenAI/Anthropic."}
+```
+
+Sai key trả `403` với `{"detail":"Invalid API key."}`.
+
+### Exercise 4.2: JWT
+
+Đọc `04-api-gateway/production/auth.py`. Luồng:
+
+1. `POST /auth/token` nhận username và password. `authenticate_user` đối chiếu bảng demo. Đúng thì `create_token` ký JWT bằng `JWT_SECRET`, thuật toán HS256, hạn 60 phút. Payload có `sub` (username), `role`, `iat`, `exp`.
+2. Client gửi `Authorization: Bearer <token>` lên `POST /ask`.
+3. `verify_token` kiểm chữ ký và hạn. Hết hạn hoặc không có token → **401**. Chữ ký sai → **403**. Server không cần lưu session: user và role nằm trong token.
+
+`CODE_LAB.md` ghi `POST /token` với `admin` / `secret`. Bản trong repo không có endpoint đó. Lấy token ở `POST /auth/token` với `student` / `demo123`. Gửi `admin` / `secret` trả **401** `{"detail":"Invalid credentials"}`.
+
+Token nhận được dài 168 ký tự, `token_type=bearer`, `expires_in_minutes=60`. Không dán token vào bài.
+
+Không có token:
+
+```text
+HTTP/1.1 401 Unauthorized
+www-authenticate: Bearer
+
+{"detail":"Authentication required. Include: Authorization: Bearer <token>"}
+```
+
+Có token của `student`:
+
+```text
+HTTP/1.1 200 OK
+
+{"question":"Explain JWT","answer":"Tôi là AI agent được deploy lên cloud. Câu hỏi của bạn đã được nhận.","usage":{"requests_remaining":9,"budget_remaining_usd":1.9e-05}}
+```
+
+`requests_remaining: 9` nghĩa là vừa dùng 1 suất trong hạn 10. Trường `budget_remaining_usd` trong response này đang nhận `usage.total_cost_usd` từ `app.py`, nên 1.9e-05 là chi phí đã ghi, không phải số tiền còn lại. Số còn lại nằm ở `/me/usage` bên dưới.
+
+`teacher` / `teach456` là role `admin`. `student` là role `user`.
+
+### Exercise 4.3: Rate limit
+
+Đọc `rate_limiter.py`. Thuật toán là **sliding window**: mỗi user một hàng timestamp. Request cũ hơn 60 giây bị bỏ khỏi hàng. Số timestamp còn lại trong 60 giây mà đạt ngưỡng thì **429**, kèm `Retry-After`.
+
+| Role | Limiter | Ngưỡng |
+| --- | --- | --- |
+| `user` (`student`) | `rate_limiter_user` | 10 request / 60 giây |
+| `admin` (`teacher`) | `rate_limiter_admin` | 100 request / 60 giây |
+
+Admin không được bỏ limit. Admin chỉ có ngưỡng cao hơn, vì `app.py` chọn limiter theo `role` trong token. State nằm trong RAM của process, nên restart là đếm lại từ đầu. File ghi chú bản production thật nên chuyển bộ đếm sang Redis để nhiều instance dùng chung.
+
+Vòng lặp 20 lần với token `student` (đã che):
+
+```text
+1–10  → 200
+11–20 → 429
+```
+
+Lần thứ 11 trở đi:
+
+```text
+HTTP/1.1 429 Too Many Requests
+x-ratelimit-limit: 10
+x-ratelimit-remaining: 0
+retry-after: 55
+
+{"detail":{"error":"Rate limit exceeded","limit":10,"window_seconds":60,"retry_after_seconds":55}}
+```
+
+Request không có token trả 401 trước khi đếm, nên không làm giảm suất của user.
+
+### Exercise 4.4: Cost guard
+
+`cost_guard.py` đã có logic, không cần viết thêm cho bài K5. Cách nó chặn tiền:
+
+- Mỗi user một `UsageRecord` trong ngày (`YYYY-MM-DD`). Sang ngày mới thì record được tạo lại, tức ngân sách ngày được reset.
+- `check_budget` chạy **trước** khi gọi LLM. Tổng toàn hệ thống đạt `global_daily_budget_usd` (10 USD) thì **503**. Chi phí của riêng user đạt `daily_budget_usd` (1 USD) thì **402**. Đạt 80% thì chỉ ghi warning, vẫn cho gọi.
+- `record_usage` chạy **sau** khi có câu trả lời. Token đầu vào và đầu ra nhân giá `0.00015` và `0.0006` USD / 1.000 token, cộng vào record của user và vào tổng toàn cục.
+- Bộ đếm đang nằm trong RAM. Ghi chú trong file nói bản chạy nhiều instance phải để Redis hoặc database, nếu không mỗi process có một ngân sách riêng và restart làm mất số đã tiêu.
+
+Sau 10 request thành công, `GET /me/usage` (cùng user, endpoint này không bị rate limit):
+
+```text
+HTTP/1.1 200 OK
+
+{"user_id":"student","date":"2026-11-26","requests":10,"input_tokens":40,"output_tokens":316,"cost_usd":0.000196,"budget_usd":1.0,"budget_remaining_usd":0.999804,"budget_used_pct":0.0}
+```
+
+10 request mock chỉ tốn khoảng 0.0002 USD trên ngân sách 1 USD, nhưng request thứ 11 đã bị **429**. Rate limit cắt tốc độ trước khi cost guard kịp cắt tiền. Đó là lý do phải có cả hai.
+
 ## AI log
 
 ### CP1
@@ -273,3 +393,9 @@ Sau khi test: `docker compose -p k5-day14-docker down`.
 - Hỏi Cursor làm CP2: đọc Dockerfile develop và production, build hai image, đo `docker images`, chạy Compose và test qua Nginx.
 - Nhận: 4 câu Exercise 2.1, output curl của container, kích thước 1.67GB và 240MB (chênh 85.6%), sơ đồ 4 service và kết quả test cổng 80.
 - Tự kiểm tra: `docker images my-agent` in đúng hai số đó; `GET /health` trong container develop trả `"container":true`; `GET http://localhost/health` lúc stack chạy có header `Server: nginx`. Không dùng số 800MB / 160MB trong README.
+
+### CP3
+
+- Hỏi Cursor làm CP3: chạy `04-api-gateway` develop và production, lấy mã 401, 200, 429, giải thích cost guard.
+- Nhận: output curl ở trên, vòng lặp 1–10 là 200 và 11–20 là 429, cách cost guard trả 402 hoặc 503.
+- Tự kiểm tra: thiếu `X-API-Key` ra 401, đúng key ra 200; `POST /auth/token` với `admin`/`secret` ra 401; token `student` gọi đủ 10 lần rồi lần 11 ra 429 với `x-ratelimit-limit: 10`. Token không dán vào bài.
