@@ -491,47 +491,16 @@ Xong thì `docker compose -p k5-day14-scaling down`.
 
 ## AI log
 
-### CP1
+Mỗi dòng: hỏi Cursor, kết quả nhận được, rồi tự chạy lại lệnh. Số trong bài lấy từ output đó, không chép README.
 
-- Hỏi Cursor làm CP1: đọc `develop/app.py` và `production/app.py`, chạy cả hai, ghi anti-pattern và bảng so sánh.
-- Nhận: danh sách anti-pattern kèm dòng code, output curl thật của cả hai bản, bảng so sánh có cột vì sao.
-- Tự kiểm tra: lệnh query của bản develop trả 200 và console in key giả; `GET /health` bản develop trả 404; bản production `GET /health` và `GET /ready` trả 200, `POST /ask` với JSON trả 200. Số và body trong bài là output của các lệnh đó, không chép từ README.
-
-### CP2
-
-- Hỏi Cursor làm CP2: đọc Dockerfile develop và production, build hai image, đo `docker images`, chạy Compose và test qua Nginx.
-- Nhận: 4 câu Exercise 2.1, output curl của container, kích thước 1.67GB và 240MB (chênh 85.6%), sơ đồ 4 service và kết quả test cổng 80.
-- Tự kiểm tra: `docker images my-agent` in đúng hai số đó; `GET /health` trong container develop trả `"container":true`; `GET http://localhost/health` lúc stack chạy có header `Server: nginx`. Không dùng số 800MB / 160MB trong README.
-
-### CP3
-
-- Hỏi Cursor làm CP3: chạy `04-api-gateway` develop và production, lấy mã 401, 200, 429, giải thích cost guard.
-- Nhận: output curl ở trên, vòng lặp 1–10 là 200 và 11–20 là 429, cách cost guard trả 402 hoặc 503.
-- Tự kiểm tra: thiếu `X-API-Key` ra 401, đúng key ra 200; `POST /auth/token` với `admin`/`secret` ra 401; token `student` gọi đủ 10 lần rồi lần 11 ra 429 với `x-ratelimit-limit: 10`. Token không dán vào bài.
-
-### CP4
-
-- Hỏi Cursor làm CP4: chạy health/ready, thử tắt khi đang có request, chạy 3 agent với Redis và `test_stateless.py`.
-- Nhận: `/health` HTTP 200 dù body `degraded` vì RAM 94.4%; `docker stop` để request trả 200 rồi mới thấy signal 15; 5 câu đi qua 3 instance và history còn 10 dòng.
-- Tự kiểm tra: `docker compose ps` có agent-1, agent-2, agent-3; output script in ba `instance-...` và `Total messages: 10`. Tắt một agent rồi gọi tiếp cùng session, history thành 12 dòng.
-
-### CP6
-
-- Hỏi Cursor deploy CP6 lên Render và nói rõ cần cung cấp gì.
-- Nhận: Blueprint từ `06-lab-complete/render.yaml`, URL `https://day14-agent-w8dm.onrender.com`, bốn mã 200 / 200 / 401 / 200. Key không ghi vào bài.
-- Tự kiểm tra: `GET /health` và `GET /ready` trên URL đó trả 200; `POST /ask` không key trả 401; có key trả 200 với câu mock. Dashboard service ở trạng thái Live.
-
-### CP7
-
-- Hỏi Cursor làm CP7: chạy agent v1/v2 local, load test, eval, sửa knowledge base cho đến khi quality gate 100%.
-- Nhận: số trong `BENCHMARK_REPORT.md` mục 1–3, file JSON trong `develop/reports/`, histogram `agent_question_length_chars`, hai mục KB cho `security-02` và `scaling-03`, workflow `.github/workflows/eval.yml`.
-- Tự kiểm tra: `eval_v2_fixed.json` có accuracy 1.0 và quality gate passed. Bốn file `load_v2_c*.json` và ba file `load_v2_slow_*.json` có đủ. Số trong báo cáo khớp các file đó.
-
-### CP8
-
-- Hỏi Cursor làm CP8: bật stack observability, Locust 1 và 3 instance, chụp Grafana, Jaeger, Prometheus.
-- Nhận: `BENCHMARK_REPORT.md` mục 4–6, CSV `scale_1_stats.csv` và `scale_3_stats.csv`, bốn ảnh trong `screenshots/`. Hai alert firing sau 96 giây và 156 giây.
-- Tự kiểm tra: lúc đo 1 instance chỉ có một container, lúc đo 3 instance có ba container. Ảnh Prometheus thấy `AgentHighErrorRate` và `AgentHighLatencyP95` cùng firing. `trace_id` trong báo cáo có trong log JSON.
+- **CP1.** So sánh develop và production. Develop `POST /ask?question=` trả 200, `GET /health` trả 404. Production `/health`, `/ready` và `POST /ask` JSON trả 200.
+- **CP2.** Build hai image. `docker images` ra 1.67GB và 240MB. Request qua Nginx có header `Server: nginx`.
+- **CP3.** Gọi API security. Thiếu key trả 401, đúng key trả 200, request 1–10 trả 200, request 11 trả 429. Token không dán vào bài.
+- **CP4.** Health, graceful shutdown, 3 instance. `/health` vẫn 200 khi RAM 94.4%. `docker stop` để request đang chạy trả 200. History còn 10 dòng, sau khi tắt một agent còn 12.
+- **CP5.** Sửa `06-lab-complete/` rồi chạy `check_production_ready.py` trong WSL. Script in `PASS 12/12`. Không sửa file chấm.
+- **CP6.** Deploy Render. `https://day14-agent-w8dm.onrender.com`: `/health` 200, `/ready` 200, `/ask` thiếu key 401, có key 200. Key không ghi vào repo.
+- **CP7.** Load test và eval. `eval_v2_fixed.json` đạt accuracy 1.0. Số trong `BENCHMARK_REPORT.md` mục 1–3 khớp file JSON.
+- **CP8.** Stack Grafana/Jaeger/Prometheus và Locust 1 rồi 3 instance. Hai alert firing sau 96 giây và 156 giây. `trace_id` trong báo cáo có trong log. Số mục 4–5 khớp CSV.
 
 ## Part 6: Final Project
 
@@ -563,9 +532,3 @@ Chạy trong Ubuntu (WSL), `os.name=posix`, Docker server 29.7.2:
   🎉 PASS 12/12 — PRODUCTION READY! Deploy nào!
 ================================================================
 ```
-
-### CP5
-
-- Hỏi Cursor làm CP5: sửa TODO trong `06-lab-complete/` cho đủ 12 tiêu chí, chạy `python check_production_ready.py` đến khi PASS. Chưa cần tài khoản Render.
-- Nhận: agent có `/health` luôn 200, `/ready` 503 khi Redis chết, API key 401, rate limit 429 trong Redis, cost guard 402, log JSON, Dockerfile multi-stage 56 MB, compose agent + redis, `render.yaml` và `railway.toml`. Output script ở trên.
-- Tự kiểm tra: script chạy trong WSL (`os.name=posix`) với Docker 29.7.2, in `12/12 tiêu chí đạt · 43/43 checks passed`. Không sửa `check_production_ready.py`.
