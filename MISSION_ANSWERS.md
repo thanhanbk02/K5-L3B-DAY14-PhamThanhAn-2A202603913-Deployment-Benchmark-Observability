@@ -521,6 +521,12 @@ Xong thì `docker compose -p k5-day14-scaling down`.
 - Nhận: Blueprint từ `06-lab-complete/render.yaml`, URL `https://day14-agent-w8dm.onrender.com`, bốn mã 200 / 200 / 401 / 200. Key không ghi vào bài.
 - Tự kiểm tra: `GET /health` và `GET /ready` trên URL đó trả 200; `POST /ask` không key trả 401; có key trả 200 với câu mock. Dashboard service ở trạng thái Live.
 
+### CP7
+
+- Hỏi Cursor làm CP7: chạy agent v1/v2 local, load test, eval, sửa knowledge base cho đến khi quality gate 100%.
+- Nhận: số trong `BENCHMARK_REPORT.md` mục 1–3, file JSON trong `develop/reports/`, histogram `agent_question_length_chars`, hai mục KB cho `security-02` và `scaling-03`, workflow `.github/workflows/eval.yml`.
+- Tự kiểm tra: `eval_v2_fixed.json` có accuracy 1.0 và quality gate passed. Bốn file `load_v2_c*.json` và ba file `load_v2_slow_*.json` có đủ. Số trong báo cáo khớp các file đó.
+
 ## Part 6: Final Project
 
 Code nằm trong `06-lab-complete/`. Bản này đã deploy lên Render tại `https://day14-agent-w8dm.onrender.com` (mục Part 3). `render.yaml` khai Redis và `healthCheckPath: /health`. `AGENT_API_KEY` dùng `generateValue`, không ghi key vào file.
